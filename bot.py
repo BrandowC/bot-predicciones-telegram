@@ -19,9 +19,10 @@ AVISO = ("Son estimaciones estadísticas, no garantías. Las casas de apuestas t
          "este modelo no ve. Apuesta solo lo que puedas perder.")
 
 AYUDA = (
-    "Deportes (muestran hoy y próximos días, con la comparación contra el mercado):\n"
+    "Deportes (primero los EN VIVO, luego hoy y próximos días, comparados con el mercado):\n"
     "/futbol  /baloncesto  /beisbol  /americano  /hockey  /mma  /boxeo\n"
-    "Puedes filtrar: /futbol colombia · /futbol libertadores · /futbol millonarios\n\n"
+    "Puedes filtrar: /futbol colombia · /futbol libertadores · /futbol millonarios\n"
+    "/envivo – solo lo que se está jugando ahora (todos los deportes) · /envivo futbol\n\n"
     "Apuestas:\n"
     "/apostar – registrar una apuesta\n"
     "/pendientes – marcar ganada/perdida\n"
@@ -35,22 +36,30 @@ SEL, TEXTO, LIBRE, CUOTA, MONTO = range(5)
 
 
 # ------------------------------------------------------------ deportes
-async def listar(update: Update, ctx: ContextTypes.DEFAULT_TYPE, deporte: str):
-    filtro = " ".join(ctx.args or [])
-    espera = await update.message.reply_text("Buscando partidos y calculando…")
+async def listar(update: Update, ctx: ContextTypes.DEFAULT_TYPE, deporte: str, filtro=None,
+                 solo_vivo=False, silencioso=False):
+    """Envía los partidos de un deporte. Devuelve cuántos mostró."""
+    if filtro is None:
+        filtro = " ".join(ctx.args or [])
+    espera = None if silencioso else await update.message.reply_text(
+        "Buscando partidos y calculando…")
     try:
-        items, nota = await asyncio.to_thread(deportes.reporte, deporte, filtro)
+        items, nota = await asyncio.to_thread(deportes.reporte, deporte, filtro, 24, solo_vivo)
     except deportes.SinConexion as e:
-        await espera.edit_text(str(e))
-        return
+        if espera:
+            await espera.edit_text(str(e))
+        return 0
     except Exception as e:
         logging.exception("error en %s", deporte)
-        await espera.edit_text(f"Error obteniendo datos: {e}")
-        return
+        if espera:
+            await espera.edit_text(f"Error obteniendo datos: {e}")
+        return 0
     if not items:
-        await espera.edit_text(nota)
-        return
-    await espera.delete()
+        if espera:
+            await espera.edit_text(nota)
+        return 0
+    if espera:
+        await espera.delete()
     lista = ctx.chat_data.setdefault("lista", [])
     lista.clear()
     # agrupar por liga y enviar en bloques de 4 partidos con sus botones de "apostar"
@@ -69,6 +78,27 @@ async def listar(update: Update, ctx: ContextTypes.DEFAULT_TYPE, deporte: str):
                                             reply_markup=InlineKeyboardMarkup(botones))
     cierre = (nota + "\n" if nota else "") + AVISO
     await update.message.reply_text(cierre)
+    return len(items)
+
+
+async def envivo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/envivo → todos los deportes · /envivo futbol → uno · /envivo futbol colombia → filtrado."""
+    args = [a.lower() for a in (ctx.args or [])]
+    alias = {"fútbol": "futbol", "béisbol": "beisbol"}
+    if args:
+        args[0] = alias.get(args[0], args[0])
+    if args and args[0] in deportes.DEPORTES:
+        deps, filtro = [args[0]], " ".join(args[1:])
+    else:
+        deps, filtro = [d for d in deportes.DEPORTES if d != "mma"], " ".join(args)
+    aviso = await update.message.reply_text("Buscando partidos en vivo…")
+    total = 0
+    for d in deps:
+        total += await listar(update, ctx, d, filtro=filtro, solo_vivo=True, silencioso=True) or 0
+    await aviso.delete()
+    if not total:
+        await update.message.reply_text("No hay partidos en vivo ahora mismo"
+                                        + (f" para «{filtro}»" if filtro else "") + ".")
 
 
 def _handler_deporte(deporte):
@@ -288,6 +318,7 @@ async def post_init(app: Application):
     await app.bot.set_my_commands([
         BotCommand("futbol", "Fútbol: partidos y predicciones"), BotCommand("baloncesto", "Baloncesto (NBA)"),
         BotCommand("beisbol", "Béisbol (MLB)"), BotCommand("americano", "Fútbol americano (NFL)"),
+        BotCommand("envivo", "Partidos en vivo ahora"),
         BotCommand("hockey", "Hockey (NHL)"), BotCommand("mma", "MMA / UFC"), BotCommand("boxeo", "Boxeo"),
         BotCommand("apostar", "Registrar una apuesta"), BotCommand("pendientes", "Marcar ganada/perdida"),
         BotCommand("balance", "Mi balance"), BotCommand("historial", "Mis últimas apuestas"),
@@ -343,6 +374,7 @@ def main():
     app.add_handler(MessageHandler(filters.Regex(r"(?i)^/f[uú]tbol\b"), _handler_deporte("futbol")))
     app.add_handler(MessageHandler(filters.Regex(r"(?i)^/b[eé]isbol\b"), _handler_deporte("beisbol")))
     app.add_handler(MessageHandler(filters.Regex(r"(?i)^/americano\b"), _handler_deporte("americano")))
+    app.add_handler(CommandHandler("envivo", envivo))
     app.add_handler(CommandHandler("boxeo", boxeo))
     app.add_handler(CommandHandler("pendientes", pendientes))
     app.add_handler(CallbackQueryHandler(resolver_cb, pattern=r"^res:"))
